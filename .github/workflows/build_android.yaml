@@ -5,8 +5,6 @@ on:
     branches: [master]
     tags:
       - 'v*'
-  pull_request:
-    branches: [master]
   workflow_dispatch:  # 允许手动触发
 
 env:
@@ -22,35 +20,57 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install --profile minimal
+          rustup toolchain install stable --profile minimal
           rustup target add aarch64-linux-android
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v0-android-aarch64
+          prefix-key: v0-android-aarch64-v2
 
-      - name: Install Cross
+      # ===== 安装 Android NDK =====
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27d
+          # 自动设置 ANDROID_NDK_HOME 环境变量
+          add-to-path: true
+
+      # ===== 解决 libunwind 问题（备用） =====
+      - name: Fix libunwind symlink (NDK workaround)
+        run: |
+          # 新版 NDK 中 libgcc.a 被 libunwind.a 替代
+          # 创建符号链接以防某些工具链仍然查找 libgcc
+          CLANG_LIB_DIR=$(dirname $(find $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64 -name "libunwind.a" -path "*/aarch64*" | head -1))
+          if [ -n "$CLANG_LIB_DIR" ] && [ -f "$CLANG_LIB_DIR/libunwind.a" ] && [ ! -f "$CLANG_LIB_DIR/libgcc.a" ]; then
+            ln -sf libunwind.a "$CLANG_LIB_DIR/libgcc.a"
+            echo "Created libgcc.a -> libunwind.a symlink in $CLANG_LIB_DIR"
+          fi
+
+      # ===== 安装 cargo-ndk =====
+      - name: Install cargo-ndk
         uses: baptiste0928/cargo-install@v2
         with:
-          crate: cross
+          crate: cargo-ndk
 
-      - name: Build for Android
+      # ===== 编译 =====
+      - name: Build for Android arm64-v8a
         run: |
-          cross build --release \
+          cargo ndk \
+            -t arm64-v8a \
+            --platform 30 \
+            build --release \
             --bin steamguard \
-            --target aarch64-linux-android \
             --no-default-features \
             --features qr
 
-      - name: Strip binary (optional, 减小体积)
+      # ===== 减小体积 =====
+      - name: Strip binary
         run: |
-          # 使用 NDK 自带的 strip（cross 容器中有）
-          # 如果 cross 容器不可用，可以用 llvm-strip
-          rustup component add llvm-tools-preview
-          ~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-strip \
+          aarch64-linux-android-strip \
             target/aarch64-linux-android/release/steamguard
 
+      # ===== 上传产物 =====
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
